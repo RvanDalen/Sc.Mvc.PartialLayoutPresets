@@ -1,26 +1,35 @@
 ﻿using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Collections.Specialized;
 using System.Linq;
 using System.Web;
+using System.Xml;
 using Sitecore;
+using Sitecore.Data;
 using Sitecore.Data.Items;
 using Sitecore.Diagnostics;
 using Sitecore.Pipelines.GetPlaceholderRenderings;
+using Sitecore.Sites;
+using Sitecore.Xml;
 
 namespace Sc.Mvc.PartialLayoutPresets.Pipelines.GetPlaceholderRenderings
 {
     public class GetAllowedPartialLayoutPresets
     {
-        private StringCollection _locations = new StringCollection();
-        public IList Locations
+        protected Dictionary<string, List<ID>> Locations = new Dictionary<string, List<ID>>();
+        protected const string SharedKey = "shared";
+
+        public virtual void AddLocation(XmlNode configNode)
         {
-            get { return _locations; }
-            set { _locations = (StringCollection)value; }
+            var siteName = XmlUtil.GetAttribute("siteName", configNode, true);
+            if (string.IsNullOrEmpty(siteName)) siteName = SharedKey;
+
+            var locationId = ID.Parse(XmlUtil.GetAttribute("locationId", configNode, true));
+
+            if (!Locations.ContainsKey(siteName)) Locations.Add(siteName, new List<ID>());
+            Locations[siteName].Add(locationId);
         }
 
-        public void Process(GetPlaceholderRenderingsArgs args)
+        public virtual void Process(GetPlaceholderRenderingsArgs args)
         {
             Assert.IsNotNull(args, "args");
             var placeholderKey = args.PlaceholderKey ?? string.Empty;
@@ -40,7 +49,7 @@ namespace Sc.Mvc.PartialLayoutPresets.Pipelines.GetPlaceholderRenderings
                 //if the page is a preset page
                 contextItem.IsDerived(Consts.BasePartialLayoutPresetTemplateId) &&
                 //if the page does not have a preset component yet
-                string.IsNullOrEmpty(contextItem.GetPresetPlaceholderFromLayout(Context.Device.ID.ToString()))) 
+                string.IsNullOrEmpty(contextItem.GetPresetPlaceholderFromLayout(Context.Device.ID.ToString())))
             {
                 var partialLayoutPresetComponent = args.ContentDatabase.GetItem(Consts.PartialLayoutPresetRenderingId);
                 Assert.IsNotNull(partialLayoutPresetComponent, "partialLayoutPresetComponent");
@@ -48,12 +57,16 @@ namespace Sc.Mvc.PartialLayoutPresets.Pipelines.GetPlaceholderRenderings
                 result.Add(partialLayoutPresetComponent);
             }
 
-            //get presets from locations
-            foreach (var location in _locations)
+            var currentSiteName = GetSiteName(contextItem);
+
+            //get presets from locations, filter on siteName or shared
+            foreach (var location in Locations.Where(location => location.Key.Equals(currentSiteName)
+                                                              || location.Key.Equals(SharedKey))
+                                              .SelectMany(location => location.Value))
             {
                 var folder = args.ContentDatabase.GetItem(location);
                 if (folder == null) continue;
-                
+
                 foreach (var presetItem in folder.GetChildrenDerivedFrom(Consts.BasePartialLayoutPresetTemplateId))
                 {
                     //skip current
@@ -66,11 +79,31 @@ namespace Sc.Mvc.PartialLayoutPresets.Pipelines.GetPlaceholderRenderings
                     result.Add(presetItem);
                 }
             }
-            
+
             if (result.Count == 0) return;
 
             if (args.PlaceholderRenderings == null) args.PlaceholderRenderings = new List<Item>();
             args.PlaceholderRenderings.AddRange(result);
+        }
+
+        private string GetSiteName(Item item)
+        {
+            string siteName = null;
+
+            if (item != null)
+            {
+                //match it with a content site
+                foreach (var info in SiteContextFactory.Sites.Where(info => !string.IsNullOrEmpty(info.RootPath) && (info.RootPath != "/sitecore/content" || info.Name.Equals("website"))))
+                {
+                    if (item.Paths.FullPath.StartsWith(info.RootPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        siteName = info.Name.ToLowerInvariant();
+                        break;
+                    }
+                }
+            }
+
+            return siteName;
         }
     }
 }
