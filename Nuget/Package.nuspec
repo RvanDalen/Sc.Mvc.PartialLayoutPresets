@@ -2,7 +2,7 @@
 <package >
   <metadata>
     <id>Sc.Mvc.PartialLayoutPresets</id>
-    <version>2.0.0</version>
+    <version>2.0.1</version>
     <title>Sc.Mvc.PartialLayoutPresets</title>
     <authors>reinoud.van.dalen</authors>
     <owners></owners>
@@ -10,6 +10,9 @@
       Predefine chunks of renderings and inject them into your pages.
     </description>
     <releaseNotes>
+      1.0.1 added markup to the preset view
+      2.0.0 added possibility to configure site specific preset locations
+      2.0.1 bugfix using context site and item when sc_itemid and id are missing in Qs, as well as some housekeeping
     </releaseNotes>
     <summary>
       Predefine chunks of renderings and inject them into your pages.

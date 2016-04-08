@@ -13,9 +13,14 @@ using Sitecore.Xml;
 
 namespace Sc.Mvc.PartialLayoutPresets.Pipelines.GetPlaceholderRenderings
 {
-    public class GetAllowedPartialLayoutPresets
+    public class GetAllowedPartialLayoutPresets : GetAllowedRenderings
     {
         protected Dictionary<string, List<ID>> Locations = new Dictionary<string, List<ID>>();
+        private Item _contextItem;
+        private GetPlaceholderRenderingsArgs _args;
+        private List<Item> _placeholderRenderings;
+        private string _currentPlaceholder;
+
         protected const string SharedKey = "shared";
 
         public virtual void AddLocation(XmlNode configNode)
@@ -29,66 +34,118 @@ namespace Sc.Mvc.PartialLayoutPresets.Pipelines.GetPlaceholderRenderings
             Locations[siteName].Add(locationId);
         }
 
-        public virtual void Process(GetPlaceholderRenderingsArgs args)
+        public new void Process(GetPlaceholderRenderingsArgs args)
         {
+            _args = args;
             Assert.IsNotNull(args, "args");
-            var placeholderKey = args.PlaceholderKey ?? string.Empty;
+
+            var placeholderKey = _args.PlaceholderKey ?? string.Empty;
 
             //clean the dynamicplaceholder guids
             placeholderKey = placeholderKey.CleanPlaceholderKey();
 
-            var result = new List<Item>();
-            var currentPlaceholder = placeholderKey.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+            _placeholderRenderings = new List<Item>();
+            _currentPlaceholder = placeholderKey.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
 
+            //get contextItem from QS if possible
             var queryString = HttpContext.Current.Request.QueryString;
             var itemId = queryString["sc_itemid"] ?? queryString["id"];
-            var contextItem = args.ContentDatabase.GetItem(itemId);
+            _contextItem = string.IsNullOrEmpty(itemId) ? Context.Item : _args.ContentDatabase.GetItem(itemId);
 
-            //add preset rendering if we can resolve the page
-            if (contextItem != null &&
-                //if the page is a preset page
-                contextItem.IsDerived(Consts.BasePartialLayoutPresetTemplateId) &&
-                //if the page does not have a preset component yet
-                string.IsNullOrEmpty(contextItem.GetPresetPlaceholderFromLayout(Context.Device.ID.ToString())))
-            {
-                var partialLayoutPresetComponent = args.ContentDatabase.GetItem(Consts.PartialLayoutPresetRenderingId);
-                Assert.IsNotNull(partialLayoutPresetComponent, "partialLayoutPresetComponent");
+            //add preset rendering if we are editing a preset
+            AddPresetRenderingToBaseTemplate();
 
-                result.Add(partialLayoutPresetComponent);
-            }
+            //add normal renderings to presetplaceholder
+            AddRenderingsToPresetPlaceholder();
 
-            var currentSiteName = GetSiteName(contextItem);
+            //add preset definitions if we are editing a page
+            AddPresetDefinitionsToPage();
+
+            if (_placeholderRenderings.Count == 0) return;
+
+            if (args.PlaceholderRenderings == null) args.PlaceholderRenderings = new List<Item>();
+            args.PlaceholderRenderings.AddRange(_placeholderRenderings);
+        }
+
+        private void AddPresetDefinitionsToPage()
+        {
+            var currentSiteName = GetSiteName(_contextItem);
 
             //get presets from locations, filter on siteName or shared
-            foreach (var location in Locations.Where(location => location.Key.Equals(currentSiteName)
-                                                              || location.Key.Equals(SharedKey))
+            foreach (var location in Locations.Where(location => location.Key.Equals(currentSiteName) || location.Key.Equals(SharedKey))
                                               .SelectMany(location => location.Value))
             {
-                var folder = args.ContentDatabase.GetItem(location);
+                var folder = _args.ContentDatabase.GetItem(location);
                 if (folder == null) continue;
 
                 foreach (var presetItem in folder.GetChildrenDerivedFrom(Consts.BasePartialLayoutPresetTemplateId))
                 {
                     //skip current
-                    if (contextItem != null && presetItem.ID.Equals(contextItem.ID)) continue;
+                    if (_contextItem != null && presetItem.ID.Equals(_contextItem.ID)) continue;
 
                     //check if preset placeholder matches the current one
-                    var allowedPlaceholder = presetItem.GetPresetPlaceholderFromLayout(args.DeviceId.ToString());
-                    if (string.IsNullOrEmpty(allowedPlaceholder) || !allowedPlaceholder.Equals(currentPlaceholder, StringComparison.OrdinalIgnoreCase)) continue;
+                    var allowedPlaceholder = presetItem.GetPresetPlaceholderFromLayout(_args.DeviceId.ToString());
+                    if (string.IsNullOrEmpty(allowedPlaceholder) || !allowedPlaceholder.Equals(_currentPlaceholder, StringComparison.OrdinalIgnoreCase)) continue;
 
-                    result.Add(presetItem);
+                    _placeholderRenderings.Add(presetItem);
                 }
             }
-
-            if (result.Count == 0) return;
-
-            if (args.PlaceholderRenderings == null) args.PlaceholderRenderings = new List<Item>();
-            args.PlaceholderRenderings.AddRange(result);
         }
 
+        private void AddRenderingsToPresetPlaceholder()
+        {
+            if (!_currentPlaceholder.Equals(Consts.PartialLayoutPresetPlaceholderKey)) return;
+
+            var parentPlaceHolder = _args.PlaceholderKey.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries)
+                                                        .Reverse().Skip(1).FirstOrDefault().CleanPlaceholderKey();
+
+
+            Item placeholderItem;
+            if (ID.IsNullOrEmpty(_args.DeviceId))
+            {
+                placeholderItem = Client.Page.GetPlaceholderItem(parentPlaceHolder, _args.ContentDatabase, _args.LayoutDefinition);
+            }
+            else
+            {
+                using (new DeviceSwitcher(_args.DeviceId, _args.ContentDatabase))
+                    placeholderItem = Client.Page.GetPlaceholderItem(parentPlaceHolder, _args.ContentDatabase, _args.LayoutDefinition);
+            }
+            List<Item> list = null;
+            if (placeholderItem != null)
+            {
+                _args.HasPlaceholderSettings = true;
+                bool allowedControlsSpecified;
+                list = GetRenderings(placeholderItem, out allowedControlsSpecified);
+                if (allowedControlsSpecified)
+                {
+                    _args.CustomData["allowedControlsSpecified"] = true;
+                    _args.Options.ShowTree = false;
+                }
+            }
+            if (list == null) return;
+            if (_args.PlaceholderRenderings == null) _args.PlaceholderRenderings = new List<Item>();
+
+            _placeholderRenderings.AddRange(list);
+        }
+
+        private void AddPresetRenderingToBaseTemplate()
+        {
+            if (_contextItem != null &&
+                //if the page is a preset page
+                _contextItem.IsDerived(Consts.BasePartialLayoutPresetTemplateId) &&
+                //if the page does not have a preset component yet
+                string.IsNullOrEmpty(_contextItem.GetPresetPlaceholderFromLayout(Context.Device.ID.ToString())))
+            {
+                var partialLayoutPresetComponent = _args.ContentDatabase.GetItem(Consts.PartialLayoutPresetRenderingId);
+                Assert.IsNotNull(partialLayoutPresetComponent, "partialLayoutPresetComponent");
+
+                _placeholderRenderings.Add(partialLayoutPresetComponent);
+            }
+        }
+        
         private string GetSiteName(Item item)
         {
-            string siteName = null;
+            var siteName = Context.GetSiteName();
 
             if (item != null)
             {
@@ -97,13 +154,13 @@ namespace Sc.Mvc.PartialLayoutPresets.Pipelines.GetPlaceholderRenderings
                 {
                     if (item.Paths.FullPath.StartsWith(info.RootPath, StringComparison.OrdinalIgnoreCase))
                     {
-                        siteName = info.Name.ToLowerInvariant();
+                        siteName = info.Name;
                         break;
                     }
                 }
             }
 
-            return siteName;
+            return siteName.ToLowerInvariant();
         }
     }
 }

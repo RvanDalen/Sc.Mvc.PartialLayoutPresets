@@ -158,3 +158,5 @@ $RECYCLE.BIN/
 # Mac desktop service store files
 .DS_Store
 packages
+/Nuget/*.bak
+/Nuget/*.nupkg
